@@ -1,6 +1,5 @@
 package io.github.narendrakumar2259.networkinspector.vpn
 
-import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
@@ -16,18 +15,19 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 
 class InspectorVpnService : VpnService() {
 
     companion object {
-        private const val TAG = "InspectorVpnService"
+        private const val TAG = "InspectorVPN"
         private const val MAX_PACKET_SIZE = 32767
     }
 
-    private var vpnInterface : ParcelFileDescriptor? = null
-
+    private var vpnInterface: ParcelFileDescriptor? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
+    private var connectionTracker: ConnectionTracker? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundNotification()
@@ -43,11 +43,16 @@ class InspectorVpnService : VpnService() {
             .addDnsServer("8.8.8.8")
             .establish()
 
-        Log.d("$TAG", "VPN established with interface: ${vpnInterface?.fileDescriptor}")
+        Log.d(TAG, "VPN interface established: ${vpnInterface != null}")
+
         vpnInterface?.let { startPacketReader(it) }
     }
 
-    private fun startPacketReader(vpnInterface: ParcelFileDescriptor){
+    private fun startPacketReader(vpnInterface: ParcelFileDescriptor) {
+        val outputStream = FileOutputStream(vpnInterface.fileDescriptor)
+        val packetWriter = PacketWriter(outputStream)
+        connectionTracker = ConnectionTracker(this, packetWriter, serviceScope)
+
         serviceScope.launch {
             val inputStream = FileInputStream(vpnInterface.fileDescriptor)
             val buffer = ByteBuffer.allocate(MAX_PACKET_SIZE)
@@ -63,23 +68,45 @@ class InspectorVpnService : VpnService() {
                         if (ipHeader.protocol == IpHeader.PROTOCOL_TCP) {
                             val tcpHeader = TcpHeader.parse(buffer, ipHeader.headerLength)
 
-                            Log.d(TAG, "${ipHeader.sourceAddress}:${tcpHeader.sourcePort} → " +
-                                    "${ipHeader.destinationAddress}:${tcpHeader.destinationPort} " +
-                                    "[${if (tcpHeader.isSyn) "SYN " else ""}${if (tcpHeader.isAck) "ACK " else ""}${if (tcpHeader.isFin) "FIN " else ""}]"
+                            // Extract payload
+                            val headerSize = ipHeader.headerLength + tcpHeader.headerLength
+                            val payloadSize = length - headerSize
+                            val payload = if (payloadSize > 0) {
+                                val data = ByteArray(payloadSize)
+                                buffer.position(headerSize)
+                                buffer.get(data, 0, payloadSize)
+                                data
+                            } else {
+                                ByteArray(0)
+                            }
+
+                            // Hand off to connection tracker
+                            connectionTracker?.handleTcpPacket(
+                                sourceIp = ipHeader.sourceAddress,
+                                sourcePort = tcpHeader.sourcePort,
+                                destIp = ipHeader.destinationAddress,
+                                destPort = tcpHeader.destinationPort,
+                                sequenceNumber = tcpHeader.sequenceNumber,
+                                acknowledgmentNumber = tcpHeader.acknowledgmentNumber,
+                                isSyn = tcpHeader.isSyn,
+                                isAck = tcpHeader.isAck,
+                                isFin = tcpHeader.isFin,
+                                isRst = tcpHeader.isRst,
+                                payloadData = payload
                             )
                         }
+                        // UDP packets are silently dropped for now
+
                     } catch (e: Exception) {
-                        Log.e(TAG, "Parse error: ${e.message}")
+                        Log.e(TAG, "Error: ${e.message}")
                     }
                 }
             }
         }
     }
 
-    @SuppressLint("ForegroundServiceType")
     private fun startForegroundNotification() {
         val channelId = "vpn_channel"
-
         val channel = NotificationChannel(
             channelId,
             "VPN Service",
@@ -99,9 +126,11 @@ class InspectorVpnService : VpnService() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        connectionTracker?.closeAll()
+        connectionTracker = null
         vpnInterface?.close()
         vpnInterface = null
-        Log.d("$TAG", "VPN service destroyed and interface closed")
+        Log.d(TAG, "VPN interface closed")
         super.onDestroy()
     }
 }
