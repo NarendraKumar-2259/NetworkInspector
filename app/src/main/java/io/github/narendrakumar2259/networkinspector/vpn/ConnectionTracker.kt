@@ -2,6 +2,7 @@ package io.github.narendrakumar2259.networkinspector.vpn
 
 import android.net.VpnService
 import android.util.Log
+import io.github.narendrakumar2259.networkinspector.packet.HttpParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -110,6 +111,11 @@ class ConnectionTracker(
                     // Forward immediately in same thread, inside the lock
                     try {
                         connection.remoteChannel?.write(ByteBuffer.wrap(payload))
+                        if(key.destPort == 80){
+                            HttpParser().parseHttpRequest(payload)?.let { request ->
+                                Log.d(TAG, "HTTP Request: ${request.method} ${request.path} to ${key.destIp}:${key.destPort}")
+                            }
+                        }
                         Log.d(TAG, "→ Forwarded ${payload.size} bytes to ${key.destIp}:${key.destPort}")
                     } catch (e: Exception) {
                         Log.e(TAG, "Forward failed: ${e.message}")
