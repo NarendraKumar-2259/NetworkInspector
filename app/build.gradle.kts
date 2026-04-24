@@ -41,6 +41,10 @@ android {
 
 dependencies {
 
+    //bouncy castle
+    implementation(libs.bouncy.castle)
+    implementation(libs.bouncy.castle.pkix)
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
