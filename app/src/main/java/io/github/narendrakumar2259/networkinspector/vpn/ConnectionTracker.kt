@@ -2,6 +2,8 @@ package io.github.narendrakumar2259.networkinspector.vpn
 
 import android.net.VpnService
 import android.util.Log
+import io.github.narendrakumar2259.networkinspector.data.model.NetworkRequest
+import io.github.narendrakumar2259.networkinspector.data.repository.NetworkRepository
 import io.github.narendrakumar2259.networkinspector.packet.HttpParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,7 +15,8 @@ import java.nio.channels.SocketChannel
 class ConnectionTracker(
     private val vpnService: VpnService,
     private val packetWriter: PacketWriter,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val repository: NetworkRepository? = null
 ) {
     companion object {
         private const val TAG = "ConnectionTracker"
@@ -21,6 +24,7 @@ class ConnectionTracker(
     }
 
     private val connections = mutableMapOf<ConnectionKey, TcpConnection>()
+    private val httpParser = HttpParser()
 
     fun handleTcpPacket(
         sourceIp: String,
@@ -52,6 +56,13 @@ class ConnectionTracker(
 
         val connection = TcpConnection(key)
         connections[key] = connection
+
+        // Save initial connection to database
+        saveRequest(
+            key = key,
+            isEncrypted = destPort == 443,
+            tcpState = "SYN"
+        )
 
         scope.launch(Dispatchers.IO) {
             try {
@@ -108,14 +119,27 @@ class ConnectionTracker(
                     connection.appSequenceNumber = seqNumber + payload.size
                     packetWriter.writeAck(connection)
 
-                    // Forward immediately in same thread, inside the lock
                     try {
                         connection.remoteChannel?.write(ByteBuffer.wrap(payload))
-                        if(key.destPort == 80){
-                            HttpParser().parseHttpRequest(payload)?.let { request ->
-                                Log.d(TAG, "HTTP Request: ${request.method} ${request.path} to ${key.destIp}:${key.destPort}")
+
+                        // Parse HTTP if port 80
+                        if (key.destPort == 80) {
+                            httpParser.parseHttpRequest(payload)?.let { httpRequest ->
+                                Log.d(TAG, "HTTP: ${httpRequest.method} ${httpRequest.path}")
+                                saveRequest(
+                                    key = key,
+                                    method = httpRequest.method,
+                                    path = httpRequest.path,
+                                    host = httpRequest.headers["Host"],
+                                    headers = httpRequest.headers.entries.joinToString("\n") { "${it.key}: ${it.value}" },
+                                    requestBody = httpRequest.body,
+                                    requestSize = payload.size,
+                                    isEncrypted = false,
+                                    tcpState = "ESTABLISHED"
+                                )
                             }
                         }
+
                         Log.d(TAG, "→ Forwarded ${payload.size} bytes to ${key.destIp}:${key.destPort}")
                     } catch (e: Exception) {
                         Log.e(TAG, "Forward failed: ${e.message}")
@@ -138,6 +162,13 @@ class ConnectionTracker(
             packetWriter.writeFinAck(connection)
         }
 
+        connection.close()
+        connections.remove(key)
+    }
+
+    private fun handleRst(key: ConnectionKey) {
+        val connection = connections[key] ?: return
+        Log.d(TAG, "RST → ${key.destIp}:${key.destPort}")
         connection.close()
         connections.remove(key)
     }
@@ -182,13 +213,44 @@ class ConnectionTracker(
         }
     }
 
-    private fun handleRst(key: ConnectionKey) {
-        val connection = connections[key] ?: return
-        Log.d(TAG, "RST → ${key.destIp}:${key.destPort}")
-        connection.close()
-        connections.remove(key)
-    }
+    private fun saveRequest(
+        key: ConnectionKey,
+        method: String? = null,
+        path: String? = null,
+        host: String? = null,
+        headers: String? = null,
+        requestBody: String? = null,
+        requestSize: Int = 0,
+        responseSize: Int = 0,
+        isEncrypted: Boolean = false,
+        tcpState: String = "SYN"
+    ) {
+        repository ?: return
 
+        scope.launch(Dispatchers.IO) {
+            try {
+                repository.insert(
+                    NetworkRequest(
+                        sourceIp = key.sourceIp,
+                        sourcePort = key.sourcePort,
+                        destIp = key.destIp,
+                        destPort = key.destPort,
+                        method = method,
+                        path = path,
+                        host = host,
+                        headers = headers,
+                        requestBody = requestBody,
+                        requestSize = requestSize,
+                        responseSize = responseSize,
+                        isEncrypted = isEncrypted,
+                        tcpState = tcpState
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save request: ${e.message}")
+            }
+        }
+    }
 
     fun closeAll() {
         connections.values.forEach { it.close() }

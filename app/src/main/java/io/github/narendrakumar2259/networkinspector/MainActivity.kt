@@ -5,70 +5,64 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
+import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import io.github.narendrakumar2259.networkinspector.crypto.CertificateAuthority
+import io.github.narendrakumar2259.networkinspector.data.model.NetworkRequest
+import io.github.narendrakumar2259.networkinspector.ui.dashboard.DashboardScreen
+import io.github.narendrakumar2259.networkinspector.ui.dashboard.DashboardViewModel
+import io.github.narendrakumar2259.networkinspector.ui.detail.DetailScreen
 import io.github.narendrakumar2259.networkinspector.ui.theme.NetworkInspectorTheme
 import io.github.narendrakumar2259.networkinspector.vpn.InspectorVpnService
 
 class MainActivity : ComponentActivity() {
 
+    private val viewModel: DashboardViewModel by viewModels()
+    private lateinit var certificateAuthority: CertificateAuthority
+
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ){ result ->
-        if(result.resultCode == RESULT_OK) {
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
             startVpnService()
         }
-
     }
-
-    lateinit var certificateAuthority: CertificateAuthority
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+
+        certificateAuthority = CertificateAuthority(this)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 100)
         }
-        certificateAuthority = CertificateAuthority(this)
+
         setContent {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Button(onClick = { prepareAndStartVpn() }) {
-                    Text("Start Inspection")
-                }
+            NetworkInspectorTheme {
+                var selectedRequest by remember { mutableStateOf<NetworkRequest?>(null) }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Button(onClick = {
-                    certificateAuthority.installCA()
-                    // Show a message telling user where to find the file
-                    android.widget.Toast.makeText(
-                        this@MainActivity,
-                        "Certificate saved to Downloads folder. Go to Settings → Security → Install Certificate",
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
-                }) {
-                    Text("Install CA Certificate")
+                if (selectedRequest != null) {
+                    DetailScreen(
+                        request = selectedRequest!!,
+                        onBack = { selectedRequest = null }
+                    )
+                } else {
+                    DashboardScreen(
+                        viewModel = viewModel,
+                        onStartVpn = { prepareAndStartVpn() },
+                        onStopVpn = { stopVpnService() },
+                        onInstallCert = { installCertificate() },
+                        onRequestClick = { request ->
+                            selectedRequest = request
+                        }
+                    )
                 }
             }
         }
@@ -86,6 +80,21 @@ class MainActivity : ComponentActivity() {
     private fun startVpnService() {
         val serviceIntent = Intent(this, InspectorVpnService::class.java)
         startService(serviceIntent)
+        viewModel.setVpnRunning(true)
     }
 
+    private fun stopVpnService() {
+        val serviceIntent = Intent(this, InspectorVpnService::class.java)
+        stopService(serviceIntent)
+        viewModel.setVpnRunning(false)
+    }
+
+    private fun installCertificate() {
+        certificateAuthority.installCA()
+        Toast.makeText(
+            this,
+            "Certificate saved to Downloads. Go to Settings → Security → Install Certificate",
+            Toast.LENGTH_LONG
+        ).show()
+    }
 }

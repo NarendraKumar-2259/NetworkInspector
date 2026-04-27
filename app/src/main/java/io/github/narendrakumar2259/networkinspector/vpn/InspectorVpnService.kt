@@ -7,6 +7,8 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import io.github.narendrakumar2259.networkinspector.data.local.AppDatabase
+import io.github.narendrakumar2259.networkinspector.data.repository.NetworkRepository
 import io.github.narendrakumar2259.networkinspector.packet.IpHeader
 import io.github.narendrakumar2259.networkinspector.packet.TcpHeader
 import kotlinx.coroutines.CoroutineScope
@@ -51,7 +53,12 @@ class InspectorVpnService : VpnService() {
     private fun startPacketReader(vpnInterface: ParcelFileDescriptor) {
         val outputStream = FileOutputStream(vpnInterface.fileDescriptor)
         val packetWriter = PacketWriter(outputStream)
-        connectionTracker = ConnectionTracker(this, packetWriter, serviceScope)
+
+        // Connect to Room database
+        val dao = AppDatabase.getDatabase(applicationContext).networkRequestDao()
+        val repository = NetworkRepository(dao)
+
+        connectionTracker = ConnectionTracker(this, packetWriter, serviceScope, repository)
 
         serviceScope.launch {
             val inputStream = FileInputStream(vpnInterface.fileDescriptor)
@@ -68,7 +75,6 @@ class InspectorVpnService : VpnService() {
                         if (ipHeader.protocol == IpHeader.PROTOCOL_TCP) {
                             val tcpHeader = TcpHeader.parse(buffer, ipHeader.headerLength)
 
-                            // Extract payload
                             val headerSize = ipHeader.headerLength + tcpHeader.headerLength
                             val payloadSize = length - headerSize
                             val payload = if (payloadSize > 0) {
@@ -80,7 +86,6 @@ class InspectorVpnService : VpnService() {
                                 ByteArray(0)
                             }
 
-                            // Hand off to connection tracker
                             connectionTracker?.handleTcpPacket(
                                 sourceIp = ipHeader.sourceAddress,
                                 sourcePort = tcpHeader.sourcePort,
@@ -95,8 +100,6 @@ class InspectorVpnService : VpnService() {
                                 payloadData = payload
                             )
                         }
-                        // UDP packets are silently dropped for now
-
                     } catch (e: Exception) {
                         Log.e(TAG, "Error: ${e.message}")
                     }
